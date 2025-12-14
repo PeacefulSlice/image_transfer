@@ -2,11 +2,14 @@
 from __future__ import annotations
 
 import threading
-import time
-from pathlib import Path
 import tkinter as tk
-from tkinter import filedialog, messagebox
+from tkinter import ttk, filedialog, messagebox
+from pathlib import Path
 
+from .live_tests import sender_preflight, receiver_postflight, TestResult
+
+# ВАЖЛИВО: ці імпорти підстав під твої реальні модулі.
+# Якщо у тебе інші назви файлів/класів — скажеш, я підправлю.
 from .sender import Sender
 from .receiver import ReceiverServer
 from .config import DEFAULT_HOST, DEFAULT_PORT
@@ -15,31 +18,31 @@ from .config import DEFAULT_HOST, DEFAULT_PORT
 class App(tk.Tk):
     def __init__(self):
         super().__init__()
-        self.title("Image Transfer (imgtx) — GUI")
-        self.geometry("900x600")
+        self.title("image_transfer — GUI")
+        self.geometry("1000x650")
 
-        self._recv_thread: threading.Thread | None = None
-        self._stop_event = threading.Event()
+        self.expected_meta: dict[str, object] | None = None
+        self.stop_flag = threading.Event()
+        self.recv_thread: threading.Thread | None = None
 
-        # ===== Top controls =====
+        # ---- Controls
         top = tk.Frame(self)
         top.pack(fill="x", padx=10, pady=10)
 
-        # Receiver settings
-        tk.Label(top, text="Receiver host:").grid(row=0, column=0, sticky="w")
-        self.recv_host = tk.Entry(top, width=16)
-        self.recv_host.insert(0, DEFAULT_HOST)
-        self.recv_host.grid(row=0, column=1, padx=6)
+        tk.Label(top, text="Host").grid(row=0, column=0, sticky="w")
+        self.host = tk.Entry(top, width=18)
+        self.host.insert(0, DEFAULT_HOST)
+        self.host.grid(row=0, column=1, padx=6)
 
-        tk.Label(top, text="port:").grid(row=0, column=2, sticky="w")
-        self.recv_port = tk.Entry(top, width=8)
-        self.recv_port.insert(0, str(DEFAULT_PORT))
-        self.recv_port.grid(row=0, column=3, padx=6)
+        tk.Label(top, text="Port").grid(row=0, column=2, sticky="w")
+        self.port = tk.Entry(top, width=8)
+        self.port.insert(0, str(DEFAULT_PORT))
+        self.port.grid(row=0, column=3, padx=6)
 
-        tk.Label(top, text="out dir:").grid(row=0, column=4, sticky="w")
-        self.out_dir = tk.Entry(top, width=28)
-        self.out_dir.insert(0, "outputs/received")
-        self.out_dir.grid(row=0, column=5, padx=6)
+        tk.Label(top, text="Output dir").grid(row=0, column=4, sticky="w")
+        self.outdir = tk.Entry(top, width=28)
+        self.outdir.insert(0, "outputs/received")
+        self.outdir.grid(row=0, column=5, padx=6)
 
         self.btn_start = tk.Button(top, text="Start receiver", command=self.start_receiver)
         self.btn_start.grid(row=0, column=6, padx=6)
@@ -47,93 +50,87 @@ class App(tk.Tk):
         self.btn_stop = tk.Button(top, text="Stop receiver", command=self.stop_receiver, state="disabled")
         self.btn_stop.grid(row=0, column=7, padx=6)
 
-        # Sender settings
-        send = tk.Frame(self)
-        send.pack(fill="x", padx=10)
+        self.btn_send = tk.Button(top, text="Choose & send…", command=self.choose_and_send)
+        self.btn_send.grid(row=0, column=8, padx=6)
 
-        tk.Label(send, text="Sender -> host:").grid(row=0, column=0, sticky="w")
-        self.send_host = tk.Entry(send, width=16)
-        self.send_host.insert(0, DEFAULT_HOST)
-        self.send_host.grid(row=0, column=1, padx=6)
+        # ---- Table of test results
+        tk.Label(self, text="Live test results (during transfer):").pack(anchor="w", padx=10)
 
-        tk.Label(send, text="port:").grid(row=0, column=2, sticky="w")
-        self.send_port = tk.Entry(send, width=8)
-        self.send_port.insert(0, str(DEFAULT_PORT))
-        self.send_port.grid(row=0, column=3, padx=6)
+        self.table = ttk.Treeview(self, columns=("name", "status", "details"), show="headings", height=16)
+        self.table.heading("name", text="Test")
+        self.table.heading("status", text="OK")
+        self.table.heading("details", text="Details")
+        self.table.column("name", width=260)
+        self.table.column("status", width=60, anchor="center")
+        self.table.column("details", width=640)
+        self.table.pack(fill="both", expand=False, padx=10, pady=8)
 
-        self.btn_pick = tk.Button(send, text="Choose image…", command=self.pick_and_send)
-        self.btn_pick.grid(row=0, column=4, padx=6)
+        # ---- Log
+        tk.Label(self, text="Log:").pack(anchor="w", padx=10)
+        self.log = tk.Text(self, height=10, wrap="word")
+        self.log.pack(fill="both", expand=True, padx=10, pady=(0, 10))
 
-        # ===== Log =====
-        tk.Label(self, text="Log:").pack(anchor="w", padx=10, pady=(10, 0))
-        self.log = tk.Text(self, wrap="word")
-        self.log.pack(fill="both", expand=True, padx=10, pady=10)
         self._log("Ready.")
 
     def _log(self, msg: str):
         self.log.insert(tk.END, msg + "\n")
         self.log.see(tk.END)
 
-    def _parse_host_port(self, host_entry: tk.Entry, port_entry: tk.Entry) -> tuple[str, int]:
-        host = host_entry.get().strip()
-        try:
-            port = int(port_entry.get().strip())
-        except ValueError:
-            raise ValueError("Port must be an integer")
-        return host, port
+    def _clear_table(self):
+        for item in self.table.get_children():
+            self.table.delete(item)
 
-    # ===== Receiver =====
+    def _add_results(self, results: list[TestResult], prefix: str = ""):
+        for r in results:
+            name = f"{prefix}{r.name}" if prefix else r.name
+            self.table.insert("", "end", values=(name, "✅" if r.ok else "❌", r.details))
+
     def start_receiver(self):
-        if self._recv_thread and self._recv_thread.is_alive():
+        if self.recv_thread and self.recv_thread.is_alive():
             messagebox.showinfo("Receiver", "Receiver already running.")
             return
 
-        try:
-            host, port = self._parse_host_port(self.recv_host, self.recv_port)
-        except ValueError as e:
-            messagebox.showerror("Receiver", str(e))
-            return
+        host = self.host.get().strip()
+        port = int(self.port.get().strip())
+        outdir = Path(self.outdir.get().strip())
+        outdir.mkdir(parents=True, exist_ok=True)
 
-        out_dir = self.out_dir.get().strip()
-        Path(out_dir).mkdir(parents=True, exist_ok=True)
-
-        self._stop_event.clear()
+        self.stop_flag.clear()
         self.btn_start.config(state="disabled")
         self.btn_stop.config(state="normal")
-
-        self._log(f"[RECV] starting loop on {host}:{port}, out={out_dir}")
+        self._log(f"[RECV] starting on {host}:{port}, out={outdir}")
 
         def loop():
-            # ReceiverServer у repo "serve_once" — приймає 1 файл і завершується :contentReference[oaicite:5]{index=5}
-            # Тому робимо цикл "serve_once" для GUI.
-            while not self._stop_event.is_set():
+            # Якщо у твоєму ReceiverServer є лише serve_once() — крутимо в циклі.
+            while not self.stop_flag.is_set():
                 try:
-                    srv = ReceiverServer(host=host, port=port, output_dir=out_dir)
-                    res = srv.serve_once()
-                    self._log(f"[RECV] OK saved: {res.saved_path}")
-                    self._log(f"       sha256={res.sha256[:16]}…  {res.width}x{res.height}  {res.format}")
+                    srv = ReceiverServer(host=host, port=port, output_dir=str(outdir))
+                    res = srv.serve_once()  # має повертати шлях до збереженого файла
+                    saved_path = getattr(res, "saved_path", None) or getattr(res, "path", None) or str(res)
+
+                    self._log(f"[RECV] got file: {saved_path}")
+
+                    # ---- POSTFLIGHT tests
+                    post = receiver_postflight(saved_path, expected=self.expected_meta or {})
+                    self._add_results(post, prefix="POST: ")
+
                 except Exception as e:
-                    # якщо стоп — не спамимо
-                    if self._stop_event.is_set():
+                    if self.stop_flag.is_set():
                         break
                     self._log(f"[RECV] ERROR: {e}")
-                    time.sleep(0.3)
 
-            self._log("[RECV] stopped.")
+            self._log("[RECV] stopped")
             self.btn_start.config(state="normal")
             self.btn_stop.config(state="disabled")
 
-        self._recv_thread = threading.Thread(target=loop, daemon=True)
-        self._recv_thread.start()
+        self.recv_thread = threading.Thread(target=loop, daemon=True)
+        self.recv_thread.start()
 
     def stop_receiver(self):
-        self._stop_event.set()
-        self._log("[RECV] stopping… (if waiting on accept, stop after next connection or restart)")
-        # NOTE: serve_once блокується на accept(), тому “м’яка” зупинка
-        # може чекати до нового з’єднання. Це обмеження поточної реалізації serve_once() :contentReference[oaicite:6]{index=6}
+        self.stop_flag.set()
+        self._log("[RECV] stop requested (may stop after current accept)")
 
-    # ===== Sender =====
-    def pick_and_send(self):
+    def choose_and_send(self):
         path = filedialog.askopenfilename(
             title="Select image",
             filetypes=[("Images", "*.jpg *.jpeg *.png *.bmp"), ("All files", "*.*")]
@@ -141,19 +138,27 @@ class App(tk.Tk):
         if not path:
             return
 
-        try:
-            host, port = self._parse_host_port(self.send_host, self.send_port)
-        except ValueError as e:
-            messagebox.showerror("Sender", str(e))
+        self._clear_table()
+
+        # ---- PREFLIGHT tests
+        pre, meta = sender_preflight(path)
+        self.expected_meta = meta
+        self._add_results(pre, prefix="PRE: ")
+
+        if not all(r.ok for r in pre):
+            self._log("[SEND] preflight failed -> not sending")
             return
+
+        host = self.host.get().strip()
+        port = int(self.port.get().strip())
 
         self._log(f"[SEND] sending {path} -> {host}:{port}")
 
         def run():
             try:
                 s = Sender(host=host, port=port)
-                header = s.send_image(path)
-                self._log(f"[SEND] OK filename={header.get('filename')} size={header.get('size_bytes')} sha256={str(header.get('sha256'))[:16]}…")
+                s.send_image(path)
+                self._log("[SEND] done")
             except Exception as e:
                 self._log(f"[SEND] ERROR: {e}")
 
@@ -162,7 +167,6 @@ class App(tk.Tk):
 
 def main():
     App().mainloop()
-
 
 if __name__ == "__main__":
     main()
