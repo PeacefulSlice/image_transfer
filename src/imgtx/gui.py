@@ -53,6 +53,9 @@ class App(tk.Tk):
         self.btn_send = tk.Button(top, text="Choose & send…", command=self.choose_and_send)
         self.btn_send.grid(row=0, column=8, padx=6)
 
+        self.btn_clean = tk.Button(top, text="Clean", command=self.clean_table)
+        self.btn_clean.grid(row=0, column=9, padx=6)
+
         # ---- Table of test results
         tk.Label(self, text="Live test results (during transfer):").pack(anchor="w", padx=10)
 
@@ -79,6 +82,10 @@ class App(tk.Tk):
     def _clear_table(self):
         for item in self.table.get_children():
             self.table.delete(item)
+
+    def clean_table(self):
+        self._clear_table()
+        self._log("[UI] table cleared")
 
     def _add_results(self, results: list[TestResult], prefix: str = ""):
         for r in results:
