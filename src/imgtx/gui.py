@@ -56,6 +56,10 @@ class App(tk.Tk):
         self.btn_clean = tk.Button(top, text="Clean", command=self.clean_table)
         self.btn_clean.grid(row=0, column=9, padx=6)
 
+        self.btn_bad_send = tk.Button(top, text="Bad Send (corrupt)", command=self.choose_and_bad_send)
+        self.btn_bad_send.grid(row=0, column=10, padx=6)
+
+
         # ---- Table of test results
         tk.Label(self, text="Live test results (during transfer):").pack(anchor="w", padx=10)
 
@@ -171,6 +175,69 @@ class App(tk.Tk):
 
         threading.Thread(target=run, daemon=True).start()
 
+    
+    def choose_and_bad_send(self):
+        path = filedialog.askopenfilename(
+            title="Select image to corrupt & send",
+            filetypes=[("Images", "*.jpg *.jpeg *.png *.bmp"), ("All files", "*.*")]
+        )
+        if not path:
+            return
+    
+        self._clear_table()
+    
+        # --- PRE-FLIGHT (як у нормальному send) ---
+        pre, meta = sender_preflight(path)
+        self.expected_meta = meta
+        self._add_results(pre, prefix="PRE: ")
+    
+        # Якщо preflight вже не пройшов — виходимо
+        if not all(r.ok for r in pre):
+            self._log("[BAD SEND] preflight failed -> not corrupt-sending")
+            return
+    
+        self._log(f"[BAD SEND] corrupting and sending: {path}")
+    
+        # --- corrupt file into bytes buffer ---
+        import tempfile
+        from pathlib import Path
+    
+        p = Path(path)
+        data = p.read_bytes()
+    
+        if len(data) < 4:
+            self._log("[BAD SEND] file too small to corrupt")
+            return
+    
+        # Corrupt one byte (flip)
+        import random
+        idx = random.randrange(0, len(data))
+        corrupted = bytearray(data)
+        corrupted[idx] ^= 0xFF
+    
+        # write to temp file
+        tmp = tempfile.NamedTemporaryFile(delete=False, suffix=p.suffix)
+        tmp_path = tmp.name
+        tmp.write(corrupted)
+        tmp.close()
+    
+        self._log(f"[BAD SEND] wrote corrupted file: {tmp_path} (byte {idx} flipped)")
+    
+        # --- send corrupted file ---
+        host = self.host.get().strip()
+        port = int(self.port.get().strip())
+    
+        def run():
+            try:
+                s = Sender(host=host, port=port)
+                s.send_image(tmp_path)
+                self._log("[BAD SEND] done")
+            except Exception as e:
+                self._log(f"[BAD SEND] ERROR: {e}")
+    
+        threading.Thread(target=run, daemon=True).start()
+
+        
 
 def main():
     App().mainloop()
