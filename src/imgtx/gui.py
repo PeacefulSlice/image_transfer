@@ -8,21 +8,24 @@ from pathlib import Path
 
 from .live_tests import sender_preflight, receiver_postflight, TestResult
 
-# ВАЖЛИВО: ці імпорти підстав під твої реальні модулі.
-# Якщо у тебе інші назви файлів/класів — скажеш, я підправлю.
 from .sender import Sender
 from .receiver import ReceiverServer
 from .config import DEFAULT_HOST, DEFAULT_PORT
-from .secure_sender import SecureSender
-from .secure_receiver import SecureReceiverServer, ReplayDetected, TimestampOutOfWindow, DecryptFailed
 
+from .secure_sender import SecureSender
+from .secure_receiver import (
+    SecureReceiverServer,
+    ReplayDetected,
+    TimestampOutOfWindow,
+    DecryptFailed,
+)
 
 
 class App(tk.Tk):
     def __init__(self):
         super().__init__()
         self.title("image_transfer — GUI")
-        self.geometry("1000x650")
+        self.geometry("1050x700")
 
         self.expected_meta: dict[str, object] | None = None
         self.stop_flag = threading.Event()
@@ -47,16 +50,6 @@ class App(tk.Tk):
         self.outdir.insert(0, "outputs/received")
         self.outdir.grid(row=0, column=5, padx=6)
 
-                # ---- Secure mode controls
-        tk.Label(top, text="Password").grid(row=1, column=0, sticky="w", pady=(6, 0))
-        self.password = tk.Entry(top, width=18, show="*")
-        self.password.grid(row=1, column=1, padx=6, pady=(6, 0))
-
-        self.secure_enabled = tk.BooleanVar(value=False)
-        self.chk_secure = tk.Checkbutton(top, text="Secure mode", variable=self.secure_enabled)
-        self.chk_secure.grid(row=1, column=2, columnspan=2, sticky="w", pady=(6, 0))
-
-
         self.btn_start = tk.Button(top, text="Start receiver", command=self.start_receiver)
         self.btn_start.grid(row=0, column=6, padx=6)
 
@@ -72,15 +65,23 @@ class App(tk.Tk):
         self.btn_bad_send = tk.Button(top, text="Bad Send (corrupt)", command=self.choose_and_bad_send)
         self.btn_bad_send.grid(row=0, column=10, padx=6)
 
+        # ---- Secure mode controls (row 1)
+        tk.Label(top, text="Password").grid(row=1, column=0, sticky="w", pady=(6, 0))
+        self.password = tk.Entry(top, width=18, show="*")
+        self.password.grid(row=1, column=1, padx=6, pady=(6, 0))
+
+        self.secure_enabled = tk.BooleanVar(value=False)
+        self.chk_secure = tk.Checkbutton(top, text="Secure mode", variable=self.secure_enabled)
+        self.chk_secure.grid(row=1, column=2, columnspan=2, sticky="w", pady=(6, 0))
 
         # ---- Table of test results
         tk.Label(self, text="Live test results (during transfer):").pack(anchor="w", padx=10)
 
-        self.table = ttk.Treeview(self, columns=("name", "status", "details"), show="headings", height=16)
+        self.table = ttk.Treeview(self, columns=("name", "status", "details"), show="headings", height=18)
         self.table.heading("name", text="Test")
         self.table.heading("status", text="OK")
         self.table.heading("details", text="Details")
-        self.table.column("name", width=260)
+        self.table.column("name", width=320)
         self.table.column("status", width=60, anchor="center")
         self.table.column("details", width=640)
         self.table.pack(fill="both", expand=False, padx=10, pady=8)
@@ -112,7 +113,6 @@ class App(tk.Tk):
     def _add_one(self, name: str, ok: bool, details: str, prefix: str = ""):
         self._add_results([TestResult(name=name, ok=ok, details=details)], prefix=prefix)
 
-
     def start_receiver(self):
         if self.recv_thread and self.recv_thread.is_alive():
             messagebox.showinfo("Receiver", "Receiver already running.")
@@ -143,25 +143,23 @@ class App(tk.Tk):
                         try:
                             saved_path = srv.serve_once()
 
-                            # ✅ crypto tests (only in secure mode)
+                            # ✅ crypto tests for secure mode
                             self._add_one("CRYPTO: decrypt", True, "AES-GCM tag OK", prefix="POST: ")
                             self._add_one("CRYPTO: replay protection", True, "session accepted", prefix="POST: ")
 
-                        except ReplayDetected as e:
-                            self._log(f"[RECV] REPLAY: {e}")
+                        except ReplayDetected:
+                            self._log("[RECV] REPLAY_DETECTED")
                             self._add_one("CRYPTO: replay protection", False, "REPLAY_DETECTED", prefix="POST: ")
-                            # decrypt не запускався, тому його не ставимо або ставимо як N/A
                             continue
 
-                        except TimestampOutOfWindow as e:
-                            self._log(f"[RECV] TS: {e}")
+                        except TimestampOutOfWindow:
+                            self._log("[RECV] TIMESTAMP_OUT_OF_WINDOW")
                             self._add_one("CRYPTO: replay protection", False, "TIMESTAMP_OUT_OF_WINDOW", prefix="POST: ")
                             continue
 
-                        except DecryptFailed as e:
-                            self._log(f"[RECV] DECRYPT: {e}")
+                        except DecryptFailed:
+                            self._log("[RECV] DECRYPT_FAILED (wrong password or corrupted data)")
                             self._add_one("CRYPTO: decrypt", False, "DECRYPT_FAILED (wrong password or corrupted data)", prefix="POST: ")
-                            # replay check пройшов, бо decrypt йде після нього
                             self._add_one("CRYPTO: replay protection", True, "session accepted (before decrypt)", prefix="POST: ")
                             continue
 
@@ -172,7 +170,7 @@ class App(tk.Tk):
 
                     self._log(f"[RECV] got file: {saved_path}")
 
-                    # ---- POSTFLIGHT tests for saved file (works for both modes)
+                    # ---- POSTFLIGHT tests for saved file
                     post = receiver_postflight(saved_path, expected=self.expected_meta or {})
                     self._add_results(post, prefix="POST: ")
 
@@ -202,7 +200,6 @@ class App(tk.Tk):
 
         self._clear_table()
 
-        # ---- PREFLIGHT tests
         pre, meta = sender_preflight(path)
         self.expected_meta = meta
         self._add_results(pre, prefix="PRE: ")
@@ -235,7 +232,6 @@ class App(tk.Tk):
 
         threading.Thread(target=run, daemon=True).start()
 
-    
     def choose_and_bad_send(self):
         path = filedialog.askopenfilename(
             title="Select image to corrupt & send",
@@ -246,36 +242,29 @@ class App(tk.Tk):
 
         self._clear_table()
 
-        # --- PRE-FLIGHT (як у нормальному send) ---
         pre, meta = sender_preflight(path)
         self.expected_meta = meta
         self._add_results(pre, prefix="PRE: ")
 
-        # Якщо preflight вже не пройшов — виходимо
         if not all(r.ok for r in pre):
             self._log("[BAD SEND] preflight failed -> not corrupt-sending")
             return
 
         self._log(f"[BAD SEND] corrupting and sending: {path}")
 
-        # --- corrupt file into bytes buffer ---
         import tempfile
-        from pathlib import Path
+        import random
 
         p = Path(path)
         data = p.read_bytes()
-
         if len(data) < 4:
             self._log("[BAD SEND] file too small to corrupt")
             return
 
-        # Corrupt one byte (flip)
-        import random
         idx = random.randrange(0, len(data))
         corrupted = bytearray(data)
         corrupted[idx] ^= 0xFF
 
-        # write to temp file
         tmp = tempfile.NamedTemporaryFile(delete=False, suffix=p.suffix)
         tmp_path = tmp.name
         tmp.write(corrupted)
@@ -283,13 +272,13 @@ class App(tk.Tk):
 
         self._log(f"[BAD SEND] wrote corrupted file: {tmp_path} (byte {idx} flipped)")
 
-        # --- send corrupted file ---
         host = self.host.get().strip()
         port = int(self.port.get().strip())
+        secure = self.secure_enabled.get()
 
         def run():
             try:
-                if self.secure_enabled.get():
+                if secure:
                     pwd = self.password.get()
                     if not pwd:
                         self._log("[BAD SEND] ERROR: Secure mode enabled but password is empty")
@@ -305,7 +294,6 @@ class App(tk.Tk):
 
         threading.Thread(target=run, daemon=True).start()
 
-        
 
 def main():
     App().mainloop()
