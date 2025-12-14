@@ -13,6 +13,9 @@ from .live_tests import sender_preflight, receiver_postflight, TestResult
 from .sender import Sender
 from .receiver import ReceiverServer
 from .config import DEFAULT_HOST, DEFAULT_PORT
+from .secure_sender import SecureSender
+from .secure_receiver import SecureReceiverServer
+
 
 
 class App(tk.Tk):
@@ -43,6 +46,16 @@ class App(tk.Tk):
         self.outdir = tk.Entry(top, width=28)
         self.outdir.insert(0, "outputs/received")
         self.outdir.grid(row=0, column=5, padx=6)
+
+                # ---- Secure mode controls
+        tk.Label(top, text="Password").grid(row=1, column=0, sticky="w", pady=(6, 0))
+        self.password = tk.Entry(top, width=18, show="*")
+        self.password.grid(row=1, column=1, padx=6, pady=(6, 0))
+
+        self.secure_enabled = tk.BooleanVar(value=False)
+        self.chk_secure = tk.Checkbutton(top, text="Secure mode", variable=self.secure_enabled)
+        self.chk_secure.grid(row=1, column=2, columnspan=2, sticky="w", pady=(6, 0))
+
 
         self.btn_start = tk.Button(top, text="Start receiver", command=self.start_receiver)
         self.btn_start.grid(row=0, column=6, padx=6)
@@ -109,19 +122,32 @@ class App(tk.Tk):
         self.stop_flag.clear()
         self.btn_start.config(state="disabled")
         self.btn_stop.config(state="normal")
-        self._log(f"[RECV] starting on {host}:{port}, out={outdir}")
+        self._log(f"[RECV] starting on {host}:{port}, out={outdir} secure={self.secure_enabled.get()}")
 
         def loop():
-            # Якщо у твоєму ReceiverServer є лише serve_once() — крутимо в циклі.
             while not self.stop_flag.is_set():
                 try:
-                    srv = ReceiverServer(host=host, port=port, output_dir=str(outdir))
-                    res = srv.serve_once()  # має повертати шлях до збереженого файла
-                    saved_path = getattr(res, "saved_path", None) or getattr(res, "path", None) or str(res)
+                    if self.secure_enabled.get():
+                        pwd = self.password.get()
+                        if not pwd:
+                            self._log("[RECV] ERROR: Secure mode enabled but password is empty")
+                            break
+
+                        srv = SecureReceiverServer(
+                            host=host,
+                            port=port,
+                            output_dir=str(outdir),
+                            password=pwd,
+                        )
+                        saved_path = srv.serve_once()
+                    else:
+                        srv = ReceiverServer(host=host, port=port, output_dir=str(outdir))
+                        res = srv.serve_once()
+                        saved_path = getattr(res, "saved_path", None) or str(res)
 
                     self._log(f"[RECV] got file: {saved_path}")
 
-                    # ---- POSTFLIGHT tests
+                    # ---- POSTFLIGHT tests (works for both secure/non-secure)
                     post = receiver_postflight(saved_path, expected=self.expected_meta or {})
                     self._add_results(post, prefix="POST: ")
 
@@ -162,13 +188,22 @@ class App(tk.Tk):
 
         host = self.host.get().strip()
         port = int(self.port.get().strip())
+        secure = self.secure_enabled.get()
 
-        self._log(f"[SEND] sending {path} -> {host}:{port}")
+        self._log(f"[SEND] sending {path} -> {host}:{port} secure={secure}")
 
         def run():
             try:
-                s = Sender(host=host, port=port)
-                s.send_image(path)
+                if secure:
+                    pwd = self.password.get()
+                    if not pwd:
+                        self._log("[SEND] ERROR: Secure mode enabled but password is empty")
+                        return
+                    s = SecureSender(host=host, port=port, password=pwd)
+                    s.send_image(path)
+                else:
+                    s = Sender(host=host, port=port)
+                    s.send_image(path)
                 self._log("[SEND] done")
             except Exception as e:
                 self._log(f"[SEND] ERROR: {e}")
@@ -183,58 +218,66 @@ class App(tk.Tk):
         )
         if not path:
             return
-    
+
         self._clear_table()
-    
+
         # --- PRE-FLIGHT (як у нормальному send) ---
         pre, meta = sender_preflight(path)
         self.expected_meta = meta
         self._add_results(pre, prefix="PRE: ")
-    
+
         # Якщо preflight вже не пройшов — виходимо
         if not all(r.ok for r in pre):
             self._log("[BAD SEND] preflight failed -> not corrupt-sending")
             return
-    
+
         self._log(f"[BAD SEND] corrupting and sending: {path}")
-    
+
         # --- corrupt file into bytes buffer ---
         import tempfile
         from pathlib import Path
-    
+
         p = Path(path)
         data = p.read_bytes()
-    
+
         if len(data) < 4:
             self._log("[BAD SEND] file too small to corrupt")
             return
-    
+
         # Corrupt one byte (flip)
         import random
         idx = random.randrange(0, len(data))
         corrupted = bytearray(data)
         corrupted[idx] ^= 0xFF
-    
+
         # write to temp file
         tmp = tempfile.NamedTemporaryFile(delete=False, suffix=p.suffix)
         tmp_path = tmp.name
         tmp.write(corrupted)
         tmp.close()
-    
+
         self._log(f"[BAD SEND] wrote corrupted file: {tmp_path} (byte {idx} flipped)")
-    
+
         # --- send corrupted file ---
         host = self.host.get().strip()
         port = int(self.port.get().strip())
-    
+
         def run():
             try:
-                s = Sender(host=host, port=port)
-                s.send_image(tmp_path)
+                if self.secure_enabled.get():
+                    pwd = self.password.get()
+                    if not pwd:
+                        self._log("[BAD SEND] ERROR: Secure mode enabled but password is empty")
+                        return
+                    s = SecureSender(host=host, port=port, password=pwd)
+                    s.send_image(tmp_path)
+                else:
+                    s = Sender(host=host, port=port)
+                    s.send_image(tmp_path)
                 self._log("[BAD SEND] done")
             except Exception as e:
                 self._log(f"[BAD SEND] ERROR: {e}")
-    
+
         threading.Thread(target=run, daemon=True).start()
 
         
