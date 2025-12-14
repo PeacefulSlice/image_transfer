@@ -2,9 +2,20 @@ from __future__ import annotations
 import socket, time
 from pathlib import Path
 from typing import Dict, Any
+from cryptography.exceptions import InvalidTag
 
 from .secure_protocol import recv_header, recv_exact
 from .secure_crypto import decrypt
+
+class ReplayDetected(Exception):
+    pass
+
+class TimestampOutOfWindow(Exception):
+    pass
+
+class DecryptFailed(Exception):
+    pass
+
 
 class ReplayCache:
     def __init__(self, ttl_sec: int = 300):
@@ -19,11 +30,10 @@ class ReplayCache:
                 del self.seen[k]
 
         if session_id in self.seen:
-            raise ValueError("REPLAY_DETECTED")
+            raise ReplayDetected("REPLAY_DETECTED")
 
-        # timestamp sanity (±5 min)
         if abs(now - ts) > self.ttl:
-            raise ValueError("TIMESTAMP_OUT_OF_WINDOW")
+            raise TimestampOutOfWindow("TIMESTAMP_OUT_OF_WINDOW")
 
         self.seen[session_id] = now
 
@@ -59,7 +69,10 @@ class SecureReceiverServer:
                 aad = str(aad_dict).encode("utf-8")
 
                 # Якщо пароль не той / дані зіпсовані — тут впаде (tag mismatch)
-                plaintext = decrypt(self.password, salt, nonce, ct, aad)
+                try:
+                    plaintext = decrypt(self.password, salt, nonce, ct, aad)
+                except InvalidTag:
+                    raise DecryptFailed("DECRYPT_FAILED: invalid tag (ciphertext/header corrupted or wrong password)")
 
                 out_name = f"{session_id}__{header['filename']}"
                 out_path = self.output_dir / out_name

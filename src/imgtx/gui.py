@@ -14,7 +14,7 @@ from .sender import Sender
 from .receiver import ReceiverServer
 from .config import DEFAULT_HOST, DEFAULT_PORT
 from .secure_sender import SecureSender
-from .secure_receiver import SecureReceiverServer
+from .secure_receiver import SecureReceiverServer, ReplayDetected, TimestampOutOfWindow, DecryptFailed
 
 
 
@@ -109,6 +109,10 @@ class App(tk.Tk):
             name = f"{prefix}{r.name}" if prefix else r.name
             self.table.insert("", "end", values=(name, "✅" if r.ok else "❌", r.details))
 
+    def _add_one(self, name: str, ok: bool, details: str, prefix: str = ""):
+        self._add_results([TestResult(name=name, ok=ok, details=details)], prefix=prefix)
+
+
     def start_receiver(self):
         if self.recv_thread and self.recv_thread.is_alive():
             messagebox.showinfo("Receiver", "Receiver already running.")
@@ -131,15 +135,36 @@ class App(tk.Tk):
                         pwd = self.password.get()
                         if not pwd:
                             self._log("[RECV] ERROR: Secure mode enabled but password is empty")
+                            self._add_one("CRYPTO: decrypt", False, "password empty", prefix="POST: ")
                             break
 
-                        srv = SecureReceiverServer(
-                            host=host,
-                            port=port,
-                            output_dir=str(outdir),
-                            password=pwd,
-                        )
-                        saved_path = srv.serve_once()
+                        srv = SecureReceiverServer(host=host, port=port, output_dir=str(outdir), password=pwd)
+
+                        try:
+                            saved_path = srv.serve_once()
+
+                            # ✅ crypto tests (only in secure mode)
+                            self._add_one("CRYPTO: decrypt", True, "AES-GCM tag OK", prefix="POST: ")
+                            self._add_one("CRYPTO: replay protection", True, "session accepted", prefix="POST: ")
+
+                        except ReplayDetected as e:
+                            self._log(f"[RECV] REPLAY: {e}")
+                            self._add_one("CRYPTO: replay protection", False, "REPLAY_DETECTED", prefix="POST: ")
+                            # decrypt не запускався, тому його не ставимо або ставимо як N/A
+                            continue
+
+                        except TimestampOutOfWindow as e:
+                            self._log(f"[RECV] TS: {e}")
+                            self._add_one("CRYPTO: replay protection", False, "TIMESTAMP_OUT_OF_WINDOW", prefix="POST: ")
+                            continue
+
+                        except DecryptFailed as e:
+                            self._log(f"[RECV] DECRYPT: {e}")
+                            self._add_one("CRYPTO: decrypt", False, "DECRYPT_FAILED (wrong password or corrupted data)", prefix="POST: ")
+                            # replay check пройшов, бо decrypt йде після нього
+                            self._add_one("CRYPTO: replay protection", True, "session accepted (before decrypt)", prefix="POST: ")
+                            continue
+
                     else:
                         srv = ReceiverServer(host=host, port=port, output_dir=str(outdir))
                         res = srv.serve_once()
@@ -147,7 +172,7 @@ class App(tk.Tk):
 
                     self._log(f"[RECV] got file: {saved_path}")
 
-                    # ---- POSTFLIGHT tests (works for both secure/non-secure)
+                    # ---- POSTFLIGHT tests for saved file (works for both modes)
                     post = receiver_postflight(saved_path, expected=self.expected_meta or {})
                     self._add_results(post, prefix="POST: ")
 
