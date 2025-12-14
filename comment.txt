@@ -1,0 +1,3 @@
+python -m imgtx.cli send --host 127.0.0.1 --port 5000 --file image1.jpg
+PYTHONPATH="src" python -m imgtx.cli recv
+python -m imgtx.cli send --host 127.0.0.1 --port 5000 --file C:\path\to\photo.jpg
